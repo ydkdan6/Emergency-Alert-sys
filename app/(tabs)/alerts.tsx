@@ -12,6 +12,7 @@ type Alert = {
   latitude: number;
   longitude: number;
   responses: Response[];
+  user_id: string;
 };
 
 type Response = {
@@ -70,6 +71,15 @@ export default function AlertsScreen() {
         )
       `);
 
+      // Filter alerts based on user type
+      if (userType === 'civilian') {
+        query = query.eq('user_id', user.id);
+      } else if (userType === 'police') {
+        query = query.eq('type', 'police');
+      } else if (userType === 'hospital') {
+        query = query.eq('type', 'medical');
+      }
+
       const { data, error } = await query.order('created_at', { ascending: false });
       if (error) throw error;
 
@@ -84,8 +94,12 @@ export default function AlertsScreen() {
       const { error } = await supabase.from('alerts').update({ status }).eq('id', alertId);
       if (error) throw error;
 
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) throw new Error('Not authenticated');
+
       await supabase.from('responses').insert({
         alert_id: alertId,
+        responder_id: user.id,
         action_taken: `Status updated to ${status}`,
       });
 
@@ -215,6 +229,7 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#fff',
     padding: 20,
+    marginTop: 30,
   },
   title: {
     fontSize: 24,
