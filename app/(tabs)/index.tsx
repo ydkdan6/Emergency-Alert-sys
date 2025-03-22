@@ -1,14 +1,15 @@
-import { useEffect, useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, Alert, Image, Platform, ScrollView, Animated } from 'react-native';
+import { useState, useEffect } from 'react';
+import { View, Text, TextInput, TouchableOpacity, StyleSheet, Alert, Image, Platform, ScrollView, Animated } from 'react-native';
 import { useRouter } from 'expo-router';
 import * as Location from 'expo-location';
 import { Ambulance, Slice as Police, Shield, TriangleAlert as AlertTriangle, Clock, MapPin, User } from 'lucide-react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { BlurView } from 'expo-blur';
 import { supabase } from '../../lib/supabase';
+import { getAddressFromCoordinates } from '../../lib/geocoding';
 import { format } from 'date-fns';
 
-type Alert = {
+type EmergencyAlert = {
   id: string;
   type: 'police' | 'medical' | 'general';
   status: 'pending' | 'acknowledged' | 'responding' | 'resolved';
@@ -42,7 +43,7 @@ export default function HomeScreen() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [userType, setUserType] = useState<'civilian' | 'police' | 'hospital' | null>(null);
-  const [activeAlerts, setActiveAlerts] = useState<Alert[]>([]);
+  const [activeAlerts, setActiveAlerts] = useState<EmergencyAlert[]>([]);
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
   const [tipIndex, setTipIndex] = useState(0);
   const fadeAnim = useState(new Animated.Value(1))[0];
@@ -170,7 +171,12 @@ export default function HomeScreen() {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) throw new Error('Not authenticated');
 
-      const { data: userData, error: userError } = await supabase
+      const address = await getAddressFromCoordinates(
+        location.coords.latitude,
+        location.coords.longitude
+      );
+
+      const { data: userData } = await supabase
         .from('users')
         .select()
         .eq('id', user.id)
@@ -192,13 +198,14 @@ export default function HomeScreen() {
           latitude: location.coords.latitude,
           longitude: location.coords.longitude,
           status: 'pending',
+          address
         });
 
       if (alertError) throw alertError;
 
       Alert.alert(
         'Alert Sent',
-        'Emergency services have been notified and are on their way.',
+        `Emergency services have been notified and are on their way to ${address}`,
         [{ text: 'View Status', onPress: () => router.push('/alerts') }]
       );
     } catch (err: any) {
@@ -208,7 +215,7 @@ export default function HomeScreen() {
     }
   };
 
-  const getStatusColor = (status: Alert['status']) => {
+  const getStatusColor = (status: EmergencyAlert['status']) => {
     switch (status) {
       case 'pending':
         return '#FF4444';
@@ -316,9 +323,9 @@ export default function HomeScreen() {
                 <Text style={styles.profileTitle}>Personal Information</Text>
               </View>
               <View style={styles.profileInfo}>
-                <Text style={styles.profileText}>Name: {userProfile?.full_name || 'Not set'}</Text>
-                <Text style={styles.profileText}>Phone: {userProfile?.phone_number || 'Not set'}</Text>
-                <Text style={styles.profileText}>Blood Type: {userProfile?.blood_type || 'Not set'}</Text>
+                <Text style={styles.profileText}>Name: {userProfile.full_name || 'Not set'}</Text>
+                <Text style={styles.profileText}>Phone: {userProfile.phone_number || 'Not set'}</Text>
+                <Text style={styles.profileText}>Blood Type: {userProfile.blood_type || 'Not set'}</Text>
               </View>
               <TouchableOpacity
                 style={styles.editProfileButton}
@@ -441,7 +448,7 @@ const styles = StyleSheet.create({
     gap: 16,
   },
   emergencyButton: {
-    borderRadius: 16,
+    borderRadius: 50,
     overflow: 'hidden',
     elevation: 4,
     shadowColor: '#000',
@@ -470,6 +477,7 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: 'bold',
     textAlign: 'center',
+    borderRadius: 40,
   },
   loadingContainer: {
     position: 'absolute',

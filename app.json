@@ -22,6 +22,17 @@
     ],
     "experiments": {
       "typedRoutes": true
+    },
+    "extra": {
+      "router": {
+        "origin": false
+      },
+      "eas": {
+        "projectId": "87e51f58-56ac-4d00-952b-fdb689d5492c"
+      }
+    },
+    "android": {
+      "package": "com.dannycodess.boltexponativewind"
     }
   }
 }

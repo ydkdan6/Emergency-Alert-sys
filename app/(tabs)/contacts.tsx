@@ -183,6 +183,7 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     marginBottom: 20,
     color: '#1a1a1a',
+    marginTop: 25,
   },
   list: {
     gap: 16,

@@ -93,6 +93,7 @@ export default function RegisterScreen() {
           onChangeText={setEmail}
           autoCapitalize="none"
           keyboardType="email-address"
+          placeholderTextColor='black'
         />
         <TextInput
           style={styles.input}
@@ -100,6 +101,7 @@ export default function RegisterScreen() {
           value={password}
           onChangeText={setPassword}
           secureTextEntry
+          placeholderTextColor='black'
         />
         {userType === 'civilian' ? (
           <TextInput
@@ -107,6 +109,7 @@ export default function RegisterScreen() {
             placeholder="Full Name"
             value={fullName}
             onChangeText={setFullName}
+            placeholderTextColor='black'
           />
         ) : (
           <TextInput
@@ -114,6 +117,8 @@ export default function RegisterScreen() {
             placeholder="Organization Name"
             value={organizationName}
             onChangeText={setOrganizationName}
+            placeholderTextColor='black'
+
           />
         )}
 

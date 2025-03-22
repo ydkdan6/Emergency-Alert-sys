@@ -3,6 +3,7 @@ import { View, Text, StyleSheet, FlatList, TouchableOpacity } from 'react-native
 import { format } from 'date-fns';
 import { TriangleAlert as AlertTriangle, CircleCheck as CheckCircle2, Clock, MapPin } from 'lucide-react-native';
 import { supabase } from '../../lib/supabase';
+import { getAddressFromCoordinates } from '../../lib/geocoding';
 
 type Alert = {
   id: string;
@@ -13,6 +14,7 @@ type Alert = {
   longitude: number;
   responses: Response[];
   user_id: string;
+  address: string;
 };
 
 type Response = {
@@ -29,6 +31,7 @@ export default function AlertsScreen() {
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [error, setError] = useState('');
   const [userType, setUserType] = useState<'civilian' | 'police' | 'hospital' | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
     checkUserType();
@@ -50,6 +53,7 @@ export default function AlertsScreen() {
         .from('responders')
         .select('responder_type')
         .eq('id', user.id);
+      
       if (responder?.length) {
         setUserType(responder[0].responder_type);
       }
@@ -59,6 +63,7 @@ export default function AlertsScreen() {
   };
 
   const loadAlerts = async () => {
+    setIsLoading(true);
     try {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) return;
@@ -71,7 +76,6 @@ export default function AlertsScreen() {
         )
       `);
 
-      // Filter alerts based on user type
       if (userType === 'civilian') {
         query = query.eq('user_id', user.id);
       } else if (userType === 'police') {
@@ -83,9 +87,22 @@ export default function AlertsScreen() {
       const { data, error } = await query.order('created_at', { ascending: false });
       if (error) throw error;
 
-      setAlerts(data || []);
+      // For alerts without an address, fetch it using LocationIQ
+      const alertsWithAddresses = await Promise.all(
+        (data || []).map(async (alert) => {
+          if (!alert.address) {
+            const address = await getAddressFromCoordinates(alert.latitude, alert.longitude);
+            return { ...alert, address };
+          }
+          return alert;
+        })
+      );
+
+      setAlerts(alertsWithAddresses);
     } catch (err: any) {
       setError(err.message);
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -156,7 +173,7 @@ export default function AlertsScreen() {
         <View style={styles.infoRow}>
           <MapPin size={16} color="#666" />
           <Text style={styles.infoText}>
-            {item.latitude.toFixed(6)}, {item.longitude.toFixed(6)}
+            {item.address || `${item.latitude.toFixed(6)}, ${item.longitude.toFixed(6)}`}
           </Text>
         </View>
       </View>
@@ -229,13 +246,14 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#fff',
     padding: 20,
-    marginTop: 30,
+    marginTop: 25,
   },
   title: {
     fontSize: 24,
     fontWeight: 'bold',
     marginBottom: 20,
     color: '#1a1a1a',
+    marginTop: 25,
   },
   list: {
     gap: 16,
