@@ -31,6 +31,16 @@ type EmergencyAlert = {
     email: string;
     is_primary: boolean;
   }[];
+  // Raw junction table data (for reference, but we flatten it above)
+  alert_contacts?: {
+    contacts: {
+      name: string;
+      relationship: string;
+      phone_number: string;
+      email: string;
+      is_primary: boolean;
+    };
+  }[];
 };
 
 type UserProfile = {
@@ -158,64 +168,72 @@ export default function HomeScreen() {
   };
 
   const loadActiveAlerts = async (type: string) => {
-    try {
-      let query = supabase
-        .from('alerts')
-        .select(`
-          *,
-          users!alerts_user_id_fkey (
-            full_name,
-            phone_number,
-            medical_conditions,
-            blood_type
-          ),
-          contacts!left (
+  try {
+    let query = supabase
+      .from('alerts')
+      .select(`
+        *,
+        users!alerts_user_id_fkey (
+          full_name,
+          phone_number,
+          medical_conditions,
+          blood_type
+        ),
+        alert_contacts!alert_contacts_alert_id_fkey (
+          contacts!alert_contacts_contact_id_fkey (
             name,
             relationship,
             phone_number,
             email,
             is_primary
           )
-        `)
-        .not('status', 'eq', 'resolved')
-        .order('created_at', { ascending: false });
+        )
+      `)
+      .not('status', 'eq', 'resolved')
+      .order('created_at', { ascending: false });
 
-      // Updated filtering logic
-      if (type === 'police') {
-        // Police see: police alerts + general (SOS) alerts
-        query = query.in('type', ['police', 'general']);
-      } else if (type === 'hospital') {
-        // Medical see: medical alerts + general (SOS) alerts
-        query = query.in('type', ['medical', 'general']);
-      }
-
-      const { data, error } = await query;
-      if (error) throw error;
-      
-      setActiveAlerts(data || []);
-      
-      // Load addresses for alerts
-      if (data && data.length > 0) {
-        const addresses: { [key: string]: string } = {};
-        await Promise.all(
-          data.map(async (alert) => {
-            try {
-              const address = await getAddressFromCoordinates(
-                alert.latitude,
-                alert.longitude
-              );
-              addresses[alert.id] = address;
-            } catch (err) {
-              addresses[alert.id] = `${alert.latitude.toFixed(6)}, ${alert.longitude.toFixed(6)}`;
-            }
-          })
-        );
-        setAlertAddresses(addresses);
-      }
-    } catch (err: any) {
-      setError(err.message);
+    // Updated filtering logic
+    if (type === 'police') {
+      // Police see: police alerts + general (SOS) alerts
+      query = query.in('type', ['police', 'general']);
+    } else if (type === 'hospital') {
+      // Medical see: medical alerts + general (SOS) alerts
+      query = query.in('type', ['medical', 'general']);
     }
-  };
+
+    const { data, error } = await query;
+    if (error) throw error;
+    
+    // Transform the data to flatten the contacts structure for easier access
+    const transformedData = data?.map(alert => ({
+      ...alert,
+      contacts: alert.alert_contacts?.map(ac => ac.contacts).filter(Boolean) || []
+    })) || [];
+    
+    setActiveAlerts(transformedData);
+    
+    // Load addresses for alerts
+    if (transformedData && transformedData.length > 0) {
+      const addresses: { [key: string]: string } = {};
+      await Promise.all(
+        transformedData.map(async (alert) => {
+          try {
+            const address = await getAddressFromCoordinates(
+              alert.latitude,
+              alert.longitude
+            );
+            addresses[alert.id] = address;
+          } catch (err) {
+            addresses[alert.id] = `${alert.latitude.toFixed(6)}, ${alert.longitude.toFixed(6)}`;
+          }
+        })
+      );
+      setAlertAddresses(addresses);
+    }
+  } catch (err: any) {
+    setError(err.message);
+  }
+};
 
   const setupRealtimeSubscription = () => {
     if (!userType || userType === 'civilian') return;
@@ -418,10 +436,10 @@ export default function HomeScreen() {
                   )}
 
                   {/* Emergency Contacts */}
-                  {alert.contacts && alert.contacts.length > 0 && (
+                  {alert.users && alert.users.contacts && alert.users.contacts.length > 0 && (
                     <View style={styles.emergencyContacts}>
                       <Text style={styles.contactTitle}>Emergency Contacts:</Text>
-                      {alert.contacts.map((contact, index) => (
+                      {alert.users.contacts.map((contact, index) => (
                         <View key={index} style={styles.emergencyContact}>
                           <Text style={styles.contactText}>
                             {contact.name} ({contact.relationship})
