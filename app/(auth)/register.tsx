@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { View, Text, TextInput, TouchableOpacity, StyleSheet, ScrollView } from 'react-native';
+import { View, Text, TextInput, TouchableOpacity, StyleSheet, ScrollView, Alert } from 'react-native';
 import { Link, useRouter } from 'expo-router';
 import { Shield, TriangleAlert as AlertTriangle } from 'lucide-react-native';
 import { supabase } from '../../lib/supabase';
@@ -13,36 +13,129 @@ export default function RegisterScreen() {
   const [organizationName, setOrganizationName] = useState('');
   const [userType, setUserType] = useState<UserType>('civilian');
   const [error, setError] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
   const router = useRouter();
 
+  const validateForm = () => {
+    if (!email || !password) {
+      setError('Please fill in all required fields');
+      return false;
+    }
+    
+    if (password.length < 6) {
+      setError('Password must be at least 6 characters long');
+      return false;
+    }
+
+    if (userType === 'civilian' && !fullName) {
+      setError('Please enter your full name');
+      return false;
+    }
+
+    if (userType !== 'civilian' && !organizationName) {
+      setError('Please enter your organization name');
+      return false;
+    }
+
+    return true;
+  };
+
   const handleRegister = async () => {
+    if (!validateForm()) return;
+
+    setIsLoading(true);
+    setError('');
+
     try {
+      // Step 1: Sign up with Supabase Auth
       const { data: { user }, error: authError } = await supabase.auth.signUp({
-        email,
+        email: email.toLowerCase().trim(),
         password,
       });
 
-      if (authError) throw authError;
-      if (!user) throw new Error('Registration failed');
+      if (authError) {
+        // Handle specific auth errors
+        if (authError.message.includes('duplicate key value violates unique constraint')) {
+          throw new Error('An account with this email already exists');
+        } else if (authError.message.includes('Password should be at least')) {
+          throw new Error('Password must be at least 6 characters long');
+        } else if (authError.message.includes('Invalid email')) {
+          throw new Error('Please enter a valid email address');
+        } else if (authError.message.includes('weak password')) {
+          throw new Error('Password is too weak. Please use a stronger password');
+        }
+        throw authError;
+      }
 
+      if (!user) {
+        throw new Error('Registration failed. Please try again.');
+      }
+
+      // Step 2: Create profile based on user type
       if (userType === 'civilian') {
         const { error: profileError } = await supabase.from('users').insert({
           id: user.id,
-          full_name: fullName,
+          email: user.email,
+          full_name: fullName.trim(),
+          user_type: userType,
+          created_at: new Date().toISOString(),
         });
-        if (profileError) throw profileError;
+
+        if (profileError) {
+          console.error('Profile creation error:', profileError);
+          if (profileError.message.includes('duplicate key value violates unique constraint')) {
+            // Profile already exists, continue
+            console.log('User profile already exists');
+          } else {
+            throw new Error('Failed to create user profile');
+          }
+        }
       } else {
+        // For police and hospital users
         const { error: responderError } = await supabase.from('responders').insert({
           id: user.id,
-          organization_name: organizationName,
+          email: user.email,
+          organization_name: organizationName.trim(),
           responder_type: userType,
+          created_at: new Date().toISOString(),
         });
-        if (responderError) throw responderError;
+
+        if (responderError) {
+          console.error('Responder creation error:', responderError);
+          if (responderError.message.includes('duplicate key value violates unique constraint')) {
+            // Responder already exists, continue
+            console.log('Responder profile already exists');
+          } else {
+            throw new Error('Failed to create responder profile');
+          }
+        }
       }
 
-      router.replace('/(tabs)');
+      // Step 3: Show success message and redirect
+      Alert.alert(
+        'Registration Successful',
+        'Please check your email for verification instructions.',
+        [
+          {
+            text: 'OK',
+            onPress: () => router.replace('/login'),
+          },
+        ]
+      );
+
     } catch (err: any) {
-      setError(err.message);
+      console.error('Registration error:', err);
+      
+      // Set user-friendly error message
+      if (err.message.includes('duplicate') || err.message.includes('already exists')) {
+        setError('An account with this email already exists. Please try logging in instead.');
+      } else if (err.message) {
+        setError(err.message);
+      } else {
+        setError('Registration failed. Please try again.');
+      }
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -94,14 +187,16 @@ export default function RegisterScreen() {
           autoCapitalize="none"
           keyboardType="email-address"
           placeholderTextColor='black'
+          editable={!isLoading}
         />
         <TextInput
           style={styles.input}
-          placeholder="Password"
+          placeholder="Password (min 6 characters)"
           value={password}
           onChangeText={setPassword}
           secureTextEntry
           placeholderTextColor='black'
+          editable={!isLoading}
         />
         {userType === 'civilian' ? (
           <TextInput
@@ -110,6 +205,7 @@ export default function RegisterScreen() {
             value={fullName}
             onChangeText={setFullName}
             placeholderTextColor='black'
+            editable={!isLoading}
           />
         ) : (
           <TextInput
@@ -118,12 +214,18 @@ export default function RegisterScreen() {
             value={organizationName}
             onChangeText={setOrganizationName}
             placeholderTextColor='black'
-
+            editable={!isLoading}
           />
         )}
 
-        <TouchableOpacity style={styles.button} onPress={handleRegister}>
-          <Text style={styles.buttonText}>Register</Text>
+        <TouchableOpacity 
+          style={[styles.button, isLoading && styles.buttonDisabled]} 
+          onPress={handleRegister}
+          disabled={isLoading}
+        >
+          <Text style={styles.buttonText}>
+            {isLoading ? 'Creating Account...' : 'Register'}
+          </Text>
         </TouchableOpacity>
 
         <View style={styles.footer}>
@@ -199,6 +301,9 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     alignItems: 'center',
     marginTop: 8,
+  },
+  buttonDisabled: {
+    backgroundColor: '#ccc',
   },
   buttonText: {
     color: '#fff',

@@ -16,6 +16,7 @@ type EmergencyAlert = {
   created_at: string;
   latitude: number;
   longitude: number;
+  description?: string;
 };
 
 type UserProfile = {
@@ -46,6 +47,7 @@ export default function HomeScreen() {
   const [activeAlerts, setActiveAlerts] = useState<EmergencyAlert[]>([]);
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
   const [tipIndex, setTipIndex] = useState(0);
+  const [alertAddresses, setAlertAddresses] = useState<{ [key: string]: string }>({});
   const fadeAnim = useState(new Animated.Value(1))[0];
   const router = useRouter();
 
@@ -152,7 +154,27 @@ export default function HomeScreen() {
 
       const { data, error } = await query;
       if (error) throw error;
+      
       setActiveAlerts(data || []);
+      
+      // Load addresses for alerts
+      if (data && data.length > 0) {
+        const addresses: { [key: string]: string } = {};
+        await Promise.all(
+          data.map(async (alert) => {
+            try {
+              const address = await getAddressFromCoordinates(
+                alert.latitude,
+                alert.longitude
+              );
+              addresses[alert.id] = address;
+            } catch (err) {
+              addresses[alert.id] = `${alert.latitude.toFixed(6)}, ${alert.longitude.toFixed(6)}`;
+            }
+          })
+        );
+        setAlertAddresses(addresses);
+      }
     } catch (err: any) {
       setError(err.message);
     }
@@ -190,6 +212,7 @@ export default function HomeScreen() {
         if (insertError) throw insertError;
       }
 
+      // Insert alert without address column
       const { error: alertError } = await supabase
         .from('alerts')
         .insert({
@@ -198,7 +221,7 @@ export default function HomeScreen() {
           latitude: location.coords.latitude,
           longitude: location.coords.longitude,
           status: 'pending',
-          address
+          description: `Emergency alert sent from ${address}`
         });
 
       if (alertError) throw alertError;
@@ -273,7 +296,7 @@ export default function HomeScreen() {
                   <View style={styles.infoRow}>
                     <MapPin size={16} color="#666" />
                     <Text style={styles.infoText}>
-                      {alert.latitude.toFixed(6)}, {alert.longitude.toFixed(6)}
+                      {alertAddresses[alert.id] || `${alert.latitude.toFixed(6)}, ${alert.longitude.toFixed(6)}`}
                     </Text>
                   </View>
                 </View>

@@ -8,41 +8,88 @@ export default function LoginScreen() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
   const router = useRouter();
 
   const handleLogin = async () => {
+    setError('');
+    setIsLoading(true);
+    
     try {
-      const { error } = await supabase.auth.signInWithPassword({
-        email,
+      if (!email || !password) {
+        setError('Please enter both email and password');
+        return;
+      }
+
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email: email.toLowerCase().trim(),
         password,
       });
 
-      if (error) throw error;
-      
-      // Check if this is the user's first login
-      const { data: { user } } = await supabase.auth.getUser();
-      if (user) {
-        const { data: profile } = await supabase
-          .from('users')
-          .select('last_login')
-          .eq('id', user.id)
-          .single();
-
-        if (!profile?.last_login) {
-          // First time login, show welcome screens
-          router.replace('/welcome');
+      if (error) {
+        // Handle specific auth errors
+        if (error.message.includes('Invalid login credentials')) {
+          setError('Invalid email or password. Please try again.');
+        } else if (error.message.includes('Email not confirmed')) {
+          setError('Please check your email and click the confirmation link.');
+        } else if (error.message.includes('Too many requests')) {
+          setError('Too many login attempts. Please try again later.');
+        } else if (error.message.includes('structuredClone')) {
+          setError('Login failed. Please restart the app and try again.');
         } else {
+          setError(error.message);
+        }
+        return;
+      }
+
+      if (data.user) {
+        try {
+          // Check if this is the user's first login
+          const { data: profile, error: profileError } = await supabase
+            .from('users')
+            .select('last_login')
+            .eq('id', data.user.id)
+            .single();
+
+          if (profileError && profileError.code !== 'PGRST116') {
+            // PGRST116 is "not found" - acceptable for new users
+            console.warn('Profile lookup error:', profileError);
+          }
+
+          const isFirstLogin = !profile?.last_login;
+
+          // Update last login (use upsert to handle cases where profile doesn't exist)
+          await supabase
+            .from('users')
+            .upsert({
+              id: data.user.id,
+              email: data.user.email,
+              last_login: new Date().toISOString(),
+            }, {
+              onConflict: 'id'
+            });
+
+          // Navigate based on first login status
+          if (isFirstLogin) {
+            router.replace('/welcome');
+          } else {
+            router.replace('/(tabs)');
+          }
+        } catch (profileError) {
+          console.error('Profile update error:', profileError);
+          // Still allow login even if profile update fails
           router.replace('/(tabs)');
         }
-
-        // Update last login
-        await supabase
-          .from('users')
-          .update({ last_login: new Date().toISOString() })
-          .eq('id', user.id);
       }
     } catch (err: any) {
-      setError(err.message);
+      console.error('Login error:', err);
+      if (err.message && err.message.includes('structuredClone')) {
+        setError('Login failed. Please restart the app and try again.');
+      } else {
+        setError('Login failed. Please try again.');
+      }
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -70,6 +117,7 @@ export default function LoginScreen() {
           autoCapitalize="none"
           keyboardType="email-address"
           placeholderTextColor='black'
+          editable={!isLoading}
         />
         <TextInput
           style={styles.input}
@@ -78,10 +126,17 @@ export default function LoginScreen() {
           onChangeText={setPassword}
           secureTextEntry
           placeholderTextColor='black'
+          editable={!isLoading}
         />
 
-        <TouchableOpacity style={styles.button} onPress={handleLogin}>
-          <Text style={styles.buttonText}>Login</Text>
+        <TouchableOpacity 
+          style={[styles.button, isLoading && styles.buttonDisabled]} 
+          onPress={handleLogin}
+          disabled={isLoading}
+        >
+          <Text style={styles.buttonText}>
+            {isLoading ? 'Logging in...' : 'Login'}
+          </Text>
         </TouchableOpacity>
 
         <View style={styles.footer}>
@@ -133,6 +188,9 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     alignItems: 'center',
     marginTop: 8,
+  },
+  buttonDisabled: {
+    backgroundColor: '#ccc',
   },
   buttonText: {
     color: '#fff',
