@@ -24,59 +24,108 @@ export default function SettingsScreen() {
   const [notificationsEnabled, setNotificationsEnabled] = useState(true);
   const [isEditing, setIsEditing] = useState(false);
   const [error, setError] = useState('');
+  const [loading, setLoading] = useState(true);
   const router = useRouter();
 
   useEffect(() => {
     loadProfile();
-    setupNotifications();
   }, []);
 
-  const setupNotifications = async () => {
-    const token = await registerForPushNotificationsAsync();
-    if (token) {
-      // Store token in Supabase for the user
-      const { error } = await supabase
-        .from(userType === 'civilian' ? 'users' : 'responders')
-        .update({ push_token: token.data })
-        .eq('id', (await supabase.auth.getUser()).data.user?.id);
+  const setupNotifications = async (determinedUserType: 'civilian' | 'police' | 'hospital') => {
+    try {
+      const token = await registerForPushNotificationsAsync();
+      if (token) {
+        const { data: { user } } = await supabase.auth.getUser();
+        if (!user) return;
 
-      if (error) {
-        setError('Failed to setup notifications');
+        // Store token in Supabase for the user
+        const table = determinedUserType === 'civilian' ? 'users' : 'responders';
+        const { error } = await supabase
+          .from(table)
+          .update({ push_token: token })
+          .eq('id', user.id);
+
+        if (error) {
+          console.error('Push token update error:', error);
+          // Don't show error to user if it's just a missing column
+          if (error.code !== 'PGRST204') {
+            setError('Failed to setup notifications');
+          }
+        }
       }
+    } catch (err: any) {
+      console.error('Setup notifications error:', err);
+      setError('Failed to setup notifications');
     }
   };
 
   const loadProfile = async () => {
     try {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return;
+      setLoading(true);
+      setError('');
+      
+      const { data: { user }, error: userError } = await supabase.auth.getUser();
+      if (userError) throw userError;
+      if (!user) {
+        router.replace('/login');
+        return;
+      }
 
-      // Check if user is civilian
-      const { data: civilian } = await supabase
+      // Check if user is civilian first
+      const { data: civilian, error: civilianError } = await supabase
         .from('users')
         .select('*')
         .eq('id', user.id)
-        .single();
+        .maybeSingle(); // Use maybeSingle() instead of single() to avoid errors when no row exists
+
+      if (civilianError) {
+        console.error('Civilian query error:', civilianError);
+      }
 
       if (civilian) {
         setUserType('civilian');
-        setProfile(civilian);
+        setProfile({
+          full_name: civilian.full_name || '',
+          phone_number: civilian.phone_number || '',
+          medical_conditions: civilian.medical_conditions || [],
+          blood_type: civilian.blood_type || ''
+        });
+        await setupNotifications('civilian');
+        setLoading(false);
         return;
       }
 
       // Check if user is responder
-      const { data: responder } = await supabase
+      const { data: responder, error: responderError } = await supabase
         .from('responders')
         .select('*')
         .eq('id', user.id)
-        .single();
+        .maybeSingle();
+
+      if (responderError) {
+        console.error('Responder query error:', responderError);
+      }
 
       if (responder) {
-        setUserType(responder.responder_type);
-        setProfile(responder);
+        const responderType = responder.responder_type as 'police' | 'hospital';
+        setUserType(responderType);
+        setProfile({
+          organization_name: responder.organization_name || '',
+          jurisdiction: responder.jurisdiction || '',
+          verification_status: responder.verification_status || false
+        });
+        await setupNotifications(responderType);
+        setLoading(false);
+        return;
       }
+
+      // If neither civilian nor responder found
+      setError('User profile not found');
+      setLoading(false);
     } catch (err: any) {
-      setError(err.message);
+      console.error('Load profile error:', err);
+      setError(err.message || 'Failed to load profile');
+      setLoading(false);
     }
   };
 
@@ -92,91 +141,112 @@ export default function SettingsScreen() {
 
   const saveProfile = async () => {
     try {
+      if (!profile || !userType) return;
+
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) return;
 
       const table = userType === 'civilian' ? 'users' : 'responders';
-      const { error } = await supabase.from(table).update(profile).eq('id', user.id);
+      const { error } = await supabase
+        .from(table)
+        .update(profile)
+        .eq('id', user.id);
 
       if (error) throw error;
       setIsEditing(false);
+      setError('');
     } catch (err: any) {
       setError(err.message);
     }
   };
 
-  const renderCivilianProfile = () => (
-    <View style={styles.section}>
-      <Text style={styles.sectionTitle}>Personal Information</Text>
-      {isEditing ? (
-        <>
-          <TextInput
-            style={styles.input}
-            placeholder="Full Name"
-            value={(profile as UserProfile)?.full_name}
-            onChangeText={(text) => setProfile({ ...profile, full_name: text } as UserProfile)}
-          />
-          <TextInput
-            style={styles.input}
-            placeholder="Phone Number"
-            value={(profile as UserProfile)?.phone_number}
-            onChangeText={(text) => setProfile({ ...profile, phone_number: text } as UserProfile)}
-          />
-          <TextInput
-            style={styles.input}
-            placeholder="Blood Type"
-            value={(profile as UserProfile)?.blood_type}
-            onChangeText={(text) => setProfile({ ...profile, blood_type: text } as UserProfile)}
-          />
-        </>
-      ) : (
-        <>
-          <Text style={styles.profileText}>Name: {(profile as UserProfile)?.full_name}</Text>
-          <Text style={styles.profileText}>Phone: {(profile as UserProfile)?.phone_number}</Text>
-          <Text style={styles.profileText}>Blood Type: {(profile as UserProfile)?.blood_type}</Text>
-        </>
-      )}
-    </View>
-  );
+  const renderCivilianProfile = () => {
+    const civilianProfile = profile as UserProfile;
+    
+    return (
+      <View style={styles.section}>
+        <Text style={styles.sectionTitle}>Personal Information</Text>
+        {isEditing ? (
+          <>
+            <TextInput
+              style={styles.input}
+              placeholder="Full Name"
+              value={civilianProfile?.full_name || ''}
+              onChangeText={(text) => setProfile({ ...civilianProfile, full_name: text })}
+            />
+            <TextInput
+              style={styles.input}
+              placeholder="Phone Number"
+              value={civilianProfile?.phone_number || ''}
+              onChangeText={(text) => setProfile({ ...civilianProfile, phone_number: text })}
+            />
+            <TextInput
+              style={styles.input}
+              placeholder="Blood Type"
+              value={civilianProfile?.blood_type || ''}
+              onChangeText={(text) => setProfile({ ...civilianProfile, blood_type: text })}
+            />
+          </>
+        ) : (
+          <>
+            <Text style={styles.profileText}>Name: {civilianProfile?.full_name || 'Not provided'}</Text>
+            <Text style={styles.profileText}>Phone: {civilianProfile?.phone_number || 'Not provided'}</Text>
+            <Text style={styles.profileText}>Blood Type: {civilianProfile?.blood_type || 'Not provided'}</Text>
+          </>
+        )}
+      </View>
+    );
+  };
 
-  const renderResponderProfile = () => (
-    <View style={styles.section}>
-      <Text style={styles.sectionTitle}>Organization Information</Text>
-      {isEditing ? (
-        <>
-          <TextInput
-            style={styles.input}
-            placeholder="Organization Name"
-            value={(profile as ResponderProfile)?.organization_name}
-            onChangeText={(text) =>
-              setProfile({ ...profile, organization_name: text } as ResponderProfile)
-            }
-          />
-          <TextInput
-            style={styles.input}
-            placeholder="Jurisdiction"
-            value={(profile as ResponderProfile)?.jurisdiction}
-            onChangeText={(text) =>
-              setProfile({ ...profile, jurisdiction: text } as ResponderProfile)
-            }
-          />
-        </>
-      ) : (
-        <>
-          <Text style={styles.profileText}>
-            Organization: {(profile as ResponderProfile)?.organization_name}
-          </Text>
-          <Text style={styles.profileText}>
-            Jurisdiction: {(profile as ResponderProfile)?.jurisdiction}
-          </Text>
-          <Text style={styles.profileText}>
-            Status:{' '}
-            {(profile as ResponderProfile)?.verification_status ? 'Verified' : 'Pending Verification'}
-          </Text>
-        </>
-      )}
-    </View>
-  );
+  const renderResponderProfile = () => {
+    const responderProfile = profile as ResponderProfile;
+    
+    return (
+      <View style={styles.section}>
+        <Text style={styles.sectionTitle}>Organization Information</Text>
+        {isEditing ? (
+          <>
+            <TextInput
+              style={styles.input}
+              placeholder="Organization Name"
+              value={responderProfile?.organization_name || ''}
+              onChangeText={(text) =>
+                setProfile({ ...responderProfile, organization_name: text })
+              }
+            />
+            <TextInput
+              style={styles.input}
+              placeholder="Jurisdiction"
+              value={responderProfile?.jurisdiction || ''}
+              onChangeText={(text) =>
+                setProfile({ ...responderProfile, jurisdiction: text })
+              }
+            />
+          </>
+        ) : (
+          <>
+            <Text style={styles.profileText}>
+              Organization: {responderProfile?.organization_name || 'Not provided'}
+            </Text>
+            <Text style={styles.profileText}>
+              Jurisdiction: {responderProfile?.jurisdiction || 'Not provided'}
+            </Text>
+            <Text style={styles.profileText}>
+              Status: {responderProfile?.verification_status ? 'Verified' : 'Pending Verification'}
+            </Text>
+          </>
+        )}
+      </View>
+    );
+  };
+
+  if (loading) {
+    return (
+      <View style={[styles.container, styles.centered]}>
+        <Text>Loading...</Text>
+      </View>
+    );
+  }
 
   return (
     <ScrollView style={styles.container}>
@@ -245,6 +315,10 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#fff',
+  },
+  centered: {
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   header: {
     alignItems: 'center',

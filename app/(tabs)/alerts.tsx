@@ -15,6 +15,7 @@ type Alert = {
   responses: Response[];
   user_id: string;
   address: string;
+  description?: string;
 };
 
 type Response = {
@@ -34,39 +35,71 @@ export default function AlertsScreen() {
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
-    checkUserType();
-    loadAlerts();
+    initializeScreen();
   }, []);
+
+  useEffect(() => {
+    if (userType !== null) {
+      loadAlerts();
+      setupRealtimeSubscription();
+    }
+  }, [userType]);
+
+  const initializeScreen = async () => {
+    await checkUserType();
+  };
 
   const checkUserType = async () => {
     try {
       const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return;
+      if (!user) {
+        setError('User not authenticated');
+        setIsLoading(false);
+        return;
+      }
 
-      const { data: civilian } = await supabase.from('users').select().eq('id', user.id);
-      if (civilian?.length) {
+      // Check if user is a civilian
+      const { data: civilian } = await supabase
+        .from('users')
+        .select('id')
+        .eq('id', user.id)
+        .single();
+
+      if (civilian) {
         setUserType('civilian');
         return;
       }
 
+      // Check if user is a responder
       const { data: responder } = await supabase
         .from('responders')
         .select('responder_type')
-        .eq('id', user.id);
+        .eq('id', user.id)
+        .single();
       
-      if (responder?.length) {
-        setUserType(responder[0].responder_type);
+      if (responder) {
+        setUserType(responder.responder_type);
+      } else {
+        setError('User type not found');
+        setIsLoading(false);
       }
     } catch (err: any) {
+      console.error('Error checking user type:', err);
       setError(err.message);
+      setIsLoading(false);
     }
   };
 
   const loadAlerts = async () => {
+    if (!userType) return;
+    
     setIsLoading(true);
     try {
       const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return;
+      if (!user) {
+        setError('User not authenticated');
+        return;
+      }
 
       let query = supabase.from('alerts').select(`
         *,
@@ -76,6 +109,7 @@ export default function AlertsScreen() {
         )
       `);
 
+      // Apply filters based on user type
       if (userType === 'civilian') {
         query = query.eq('user_id', user.id);
       } else if (userType === 'police') {
@@ -85,43 +119,130 @@ export default function AlertsScreen() {
       }
 
       const { data, error } = await query.order('created_at', { ascending: false });
-      if (error) throw error;
+      
+      if (error) {
+        console.error('Error loading alerts:', error);
+        throw error;
+      }
 
-      // For alerts without an address, fetch it using LocationIQ
+      // For alerts without an address, fetch it using geocoding
       const alertsWithAddresses = await Promise.all(
         (data || []).map(async (alert) => {
-          if (!alert.address) {
-            const address = await getAddressFromCoordinates(alert.latitude, alert.longitude);
-            return { ...alert, address };
+          let address = '';
+          if (alert.latitude && alert.longitude) {
+            try {
+              address = await getAddressFromCoordinates(alert.latitude, alert.longitude);
+            } catch (geocodingError) {
+              console.error('Geocoding error:', geocodingError);
+              address = `${alert.latitude.toFixed(6)}, ${alert.longitude.toFixed(6)}`;
+            }
           }
-          return alert;
+          return { ...alert, address };
         })
       );
 
       setAlerts(alertsWithAddresses);
+      setError('');
     } catch (err: any) {
+      console.error('Error loading alerts:', err);
       setError(err.message);
     } finally {
       setIsLoading(false);
     }
   };
 
+  const setupRealtimeSubscription = () => {
+    if (!userType) return;
+
+    let channel;
+    
+    if (userType === 'civilian') {
+      // Subscribe to user's own alerts
+      channel = supabase
+        .channel('user-alerts')
+        .on('postgres_changes', 
+          { 
+            event: '*', 
+            schema: 'public', 
+            table: 'alerts',
+            filter: `user_id=eq.${supabase.auth.getUser().then(({data}) => data.user?.id)}`
+          }, 
+          () => {
+            loadAlerts();
+          }
+        )
+        .subscribe();
+    } else if (userType === 'police') {
+      // Subscribe to police alerts
+      channel = supabase
+        .channel('police-alerts')
+        .on('postgres_changes', 
+          { 
+            event: '*', 
+            schema: 'public', 
+            table: 'alerts',
+            filter: 'type=eq.police'
+          }, 
+          () => {
+            loadAlerts();
+          }
+        )
+        .subscribe();
+    } else if (userType === 'hospital') {
+      // Subscribe to medical alerts
+      channel = supabase
+        .channel('medical-alerts')
+        .on('postgres_changes', 
+          { 
+            event: '*', 
+            schema: 'public', 
+            table: 'alerts',
+            filter: 'type=eq.medical'
+          }, 
+          () => {
+            loadAlerts();
+          }
+        )
+        .subscribe();
+    }
+
+    // Cleanup subscription on unmount
+    return () => {
+      if (channel) {
+        supabase.removeChannel(channel);
+      }
+    };
+  };
+
   const updateAlertStatus = async (alertId: string, status: Alert['status']) => {
     try {
-      const { error } = await supabase.from('alerts').update({ status }).eq('id', alertId);
+      const { error } = await supabase
+        .from('alerts')
+        .update({ status })
+        .eq('id', alertId);
+      
       if (error) throw error;
 
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) throw new Error('Not authenticated');
 
-      await supabase.from('responses').insert({
-        alert_id: alertId,
-        responder_id: user.id,
-        action_taken: `Status updated to ${status}`,
-      });
+      // Add response record
+      const { error: responseError } = await supabase
+        .from('responses')
+        .insert({
+          alert_id: alertId,
+          responder_id: user.id,
+          action_taken: `Status updated to ${status}`,
+        });
 
+      if (responseError) {
+        console.error('Error inserting response:', responseError);
+      }
+
+      // Reload alerts to get fresh data
       loadAlerts();
     } catch (err: any) {
+      console.error('Error updating alert status:', err);
       setError(err.message);
     }
   };
@@ -176,6 +297,11 @@ export default function AlertsScreen() {
             {item.address || `${item.latitude.toFixed(6)}, ${item.longitude.toFixed(6)}`}
           </Text>
         </View>
+        {item.description && (
+          <View style={styles.infoRow}>
+            <Text style={styles.description}>{item.description}</Text>
+          </View>
+        )}
       </View>
 
       {userType !== 'civilian' && item.status !== 'resolved' && (
@@ -220,23 +346,51 @@ export default function AlertsScreen() {
     </View>
   );
 
+  const renderEmptyState = () => (
+    <View style={styles.emptyState}>
+      <Text style={styles.emptyText}>
+        {userType === 'civilian' 
+          ? 'No alerts found. Your emergency alerts will appear here.'
+          : 'No active alerts at this time.'
+        }
+      </Text>
+    </View>
+  );
+
   return (
     <View style={styles.container}>
       <Text style={styles.title}>Emergency Alerts</Text>
 
-      {error && (
+      {error ? (
         <View style={styles.errorContainer}>
           <AlertTriangle color="#FF4444" size={20} />
           <Text style={styles.errorText}>{error}</Text>
+          <TouchableOpacity 
+            style={styles.retryButton}
+            onPress={() => {
+              setError('');
+              loadAlerts();
+            }}>
+            <Text style={styles.retryText}>Retry</Text>
+          </TouchableOpacity>
         </View>
-      )}
+      ) : null}
 
-      <FlatList
-        data={alerts}
-        renderItem={renderAlert}
-        keyExtractor={(item) => item.id}
-        contentContainerStyle={styles.list}
-      />
+      {isLoading ? (
+        <View style={styles.loadingContainer}>
+          <Text style={styles.loadingText}>Loading alerts...</Text>
+        </View>
+      ) : (
+        <FlatList
+          data={alerts}
+          renderItem={renderAlert}
+          keyExtractor={(item) => item.id}
+          contentContainerStyle={styles.list}
+          ListEmptyComponent={renderEmptyState}
+          refreshing={isLoading}
+          onRefresh={loadAlerts}
+        />
+      )}
     </View>
   );
 }
@@ -298,6 +452,11 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: '#666',
   },
+  description: {
+    fontSize: 14,
+    color: '#1a1a1a',
+    fontStyle: 'italic',
+  },
   actionButtons: {
     flexDirection: 'row',
     gap: 8,
@@ -350,5 +509,37 @@ const styles = StyleSheet.create({
   errorText: {
     color: '#FF4444',
     marginLeft: 8,
+    flex: 1,
+  },
+  retryButton: {
+    backgroundColor: '#FF4444',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 6,
+  },
+  retryText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  loadingContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  loadingText: {
+    fontSize: 16,
+    color: '#666',
+  },
+  emptyState: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingVertical: 40,
+  },
+  emptyText: {
+    fontSize: 16,
+    color: '#666',
+    textAlign: 'center',
   },
 });

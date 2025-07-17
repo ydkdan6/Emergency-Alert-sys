@@ -346,9 +346,9 @@ export default function HomeScreen() {
                 <Text style={styles.profileTitle}>Personal Information</Text>
               </View>
               <View style={styles.profileInfo}>
-                <Text style={styles.profileText}>Name: {userProfile.full_name || 'Not set'}</Text>
-                <Text style={styles.profileText}>Phone: {userProfile.phone_number || 'Not set'}</Text>
-                <Text style={styles.profileText}>Blood Type: {userProfile.blood_type || 'Not set'}</Text>
+                <Text style={styles.profileText}>Name: {userProfile?.full_name || 'Not set'}</Text>
+                <Text style={styles.profileText}>Phone: {userProfile?.phone_number || 'Not set'}</Text>
+                <Text style={styles.profileText}>Blood Type: {userProfile?.blood_type || 'Not set'}</Text>
               </View>
               <TouchableOpacity
                 style={styles.editProfileButton}
