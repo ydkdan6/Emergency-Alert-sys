@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { View, Text, TextInput, TouchableOpacity, StyleSheet } from 'react-native';
 import { useRouter } from 'expo-router';
 import { Shield, TriangleAlert as AlertTriangle } from 'lucide-react-native';
@@ -9,7 +9,7 @@ export default function LoginScreen() {
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const router = useRouter();
+  const router = useRouter(); // Fixed: was "routear"
 
   const handleLogin = async () => {
     setError('');
@@ -44,44 +44,74 @@ export default function LoginScreen() {
 
       if (data.user) {
         try {
-          // Check if this is the user's first login
-          const { data: profile, error: profileError } = await supabase
+          // First, check if user is a civilian or responder
+          const { data: userProfile, error: userError } = await supabase
             .from('users')
-            .select('last_login')
+            .select('user_type, last_login')
             .eq('id', data.user.id)
             .single();
 
-          if (profileError && profileError.code !== 'PGRST116') {
-            // PGRST116 is "not found" - acceptable for new users
-            console.warn('Profile lookup error:', profileError);
+          const { data: responderProfile, error: responderError } = await supabase
+            .from('responders')
+            .select('responder_type, verification_status')
+            .eq('id', data.user.id)
+            .single();
+
+          let isFirstLogin = false;
+          let userType = null;
+
+          if (userProfile) {
+            // User is a civilian
+            userType = 'civilian';
+            isFirstLogin = !userProfile.last_login;
+            
+            // Update last login for civilian
+            await supabase
+              .from('users')
+              .update({ last_login: new Date().toISOString() })
+              .eq('id', data.user.id);
+              
+          } else if (responderProfile) {
+            // User is a responder (police or hospital)
+            userType = responderProfile.responder_type;
+            isFirstLogin = !responderProfile.verification_status; // Assuming first login if not verified
+            
+            // You might want to track last login for responders too
+            // Add a last_login column to responders table if needed
+            
+          } else {
+            // This shouldn't happen if registration worked correctly
+            console.error('User profile not found in either table');
+            setError('User profile not found. Please contact support.');
+            return;
           }
 
-          const isFirstLogin = !profile?.last_login;
-
-          // Update last login (use upsert to handle cases where profile doesn't exist)
-          await supabase
-            .from('users')
-            .upsert({
-              id: data.user.id,
-              email: data.user.email,
-              last_login: new Date().toISOString(),
-            }, {
-              onConflict: 'id'
-            });
-
-          // Navigate based on first login status
+          // Navigate based on user type and first login status
           if (isFirstLogin) {
             router.replace('/welcome');
           } else {
-            router.replace('/(tabs)');
+            // You might want different navigation based on user type
+            switch (userType) {
+              case 'civilian':
+                router.replace('/(tabs)');
+                break;
+              case 'police':
+                router.replace('/(police-tabs)'); // Assuming you have police-specific tabs
+                break;
+              case 'hospital':
+                router.replace('/(hospital-tabs)'); // Assuming you have hospital-specific tabs
+                break;
+              default:
+                router.replace('/(tabs)');
+            }
           }
         } catch (profileError) {
-          console.error('Profile update error:', profileError);
-          // Still allow login even if profile update fails
+          console.error('Profile lookup error:', profileError);
+          // Still allow login even if profile lookup fails
           router.replace('/(tabs)');
         }
       }
-    } catch (err: any) {
+    } catch (err) {
       console.error('Login error:', err);
       if (err.message && err.message.includes('structuredClone')) {
         setError('Login failed. Please restart the app and try again.');

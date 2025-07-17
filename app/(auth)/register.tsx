@@ -91,12 +91,12 @@ export default function RegisterScreen() {
           }
         }
       } else {
-        // For police and hospital users
+        // For police and hospital users - store in responders table
         const { error: responderError } = await supabase.from('responders').insert({
           id: user.id,
-          email: user.email,
           organization_name: organizationName.trim(),
           responder_type: userType,
+          verification_status: false, // New responders need verification
           created_at: new Date().toISOString(),
         });
 
@@ -112,18 +112,31 @@ export default function RegisterScreen() {
       }
 
       // Step 3: Show success message and redirect
-      Alert.alert(
-        'Registration Successful',
-        'Please check your email for verification instructions.',
-        [
-          {
-            text: 'OK',
-            onPress: () => router.replace('/login'),
-          },
-        ]
-      );
+      if (userType === 'civilian') {
+        Alert.alert(
+          'Registration Successful',
+          'Please check your email for verification instructions.',
+          [
+            {
+              text: 'OK',
+              onPress: () => router.replace('/login'),
+            },
+          ]
+        );
+      } else {
+        Alert.alert(
+          'Registration Successful',
+          'Your account has been created. Please check your email for verification instructions. Your account will need to be verified by an administrator before you can access all features.',
+          [
+            {
+              text: 'OK',
+              onPress: () => router.replace('/login'),
+            },
+          ]
+        );
+      }
 
-    } catch (err: any) {
+    } catch (err) {
       console.error('Registration error:', err);
       
       // Set user-friendly error message
@@ -158,21 +171,36 @@ export default function RegisterScreen() {
         <View style={styles.userTypeContainer}>
           <TouchableOpacity
             style={[styles.userTypeButton, userType === 'civilian' && styles.userTypeButtonActive]}
-            onPress={() => setUserType('civilian')}>
+            onPress={() => {
+              setUserType('civilian');
+              setOrganizationName(''); // Clear organization name when switching to civilian
+            }}
+            disabled={isLoading}
+          >
             <Text style={[styles.userTypeText, userType === 'civilian' && styles.userTypeTextActive]}>
               Civilian
             </Text>
           </TouchableOpacity>
           <TouchableOpacity
             style={[styles.userTypeButton, userType === 'police' && styles.userTypeButtonActive]}
-            onPress={() => setUserType('police')}>
+            onPress={() => {
+              setUserType('police');
+              setFullName(''); // Clear full name when switching to responder
+            }}
+            disabled={isLoading}
+          >
             <Text style={[styles.userTypeText, userType === 'police' && styles.userTypeTextActive]}>
               Police
             </Text>
           </TouchableOpacity>
           <TouchableOpacity
             style={[styles.userTypeButton, userType === 'hospital' && styles.userTypeButtonActive]}
-            onPress={() => setUserType('hospital')}>
+            onPress={() => {
+              setUserType('hospital');
+              setFullName(''); // Clear full name when switching to responder
+            }}
+            disabled={isLoading}
+          >
             <Text style={[styles.userTypeText, userType === 'hospital' && styles.userTypeTextActive]}>
               Hospital
             </Text>
@@ -210,7 +238,7 @@ export default function RegisterScreen() {
         ) : (
           <TextInput
             style={styles.input}
-            placeholder="Organization Name"
+            placeholder={`${userType === 'police' ? 'Police Department' : 'Hospital'} Name`}
             value={organizationName}
             onChangeText={setOrganizationName}
             placeholderTextColor='black'

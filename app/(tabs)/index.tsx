@@ -17,6 +17,20 @@ type EmergencyAlert = {
   latitude: number;
   longitude: number;
   description?: string;
+  user_id: string;
+  users: {
+    full_name: string;
+    phone_number: string;
+    medical_conditions: string[];
+    blood_type: string;
+  } | null;
+  contacts: {
+    name: string;
+    relationship: string;
+    phone_number: string;
+    email: string;
+    is_primary: boolean;
+  }[];
 };
 
 type UserProfile = {
@@ -59,6 +73,13 @@ export default function HomeScreen() {
   useEffect(() => {
     if (userType === 'civilian') {
       loadUserProfile();
+    }
+  }, [userType]);
+
+  useEffect(() => {
+    if (userType && (userType === 'police' || userType === 'hospital')) {
+      loadActiveAlerts(userType);
+      setupRealtimeSubscription();
     }
   }, [userType]);
 
@@ -120,7 +141,6 @@ export default function HomeScreen() {
       const { data: civilian } = await supabase.from('users').select().eq('id', user.id);
       if (civilian?.length) {
         setUserType('civilian');
-        loadActiveAlerts('civilian');
         return;
       }
 
@@ -131,7 +151,6 @@ export default function HomeScreen() {
       
       if (responder?.length) {
         setUserType(responder[0].responder_type);
-        loadActiveAlerts(responder[0].responder_type);
       }
     } catch (err: any) {
       setError(err.message);
@@ -142,14 +161,32 @@ export default function HomeScreen() {
     try {
       let query = supabase
         .from('alerts')
-        .select('*')
+        .select(`
+          *,
+          users!alerts_user_id_fkey (
+            full_name,
+            phone_number,
+            medical_conditions,
+            blood_type
+          ),
+          contacts!left (
+            name,
+            relationship,
+            phone_number,
+            email,
+            is_primary
+          )
+        `)
         .not('status', 'eq', 'resolved')
         .order('created_at', { ascending: false });
 
+      // Updated filtering logic
       if (type === 'police') {
-        query = query.eq('type', 'police');
+        // Police see: police alerts + general (SOS) alerts
+        query = query.in('type', ['police', 'general']);
       } else if (type === 'hospital') {
-        query = query.eq('type', 'medical');
+        // Medical see: medical alerts + general (SOS) alerts
+        query = query.in('type', ['medical', 'general']);
       }
 
       const { data, error } = await query;
@@ -178,6 +215,53 @@ export default function HomeScreen() {
     } catch (err: any) {
       setError(err.message);
     }
+  };
+
+  const setupRealtimeSubscription = () => {
+    if (!userType || userType === 'civilian') return;
+
+    let channel;
+    
+    if (userType === 'police') {
+      // Subscribe to police and general alerts
+      channel = supabase
+        .channel('police-alerts')
+        .on('postgres_changes', 
+          { 
+            event: '*', 
+            schema: 'public', 
+            table: 'alerts',
+            filter: 'type=in.(police,general)'
+          }, 
+          () => {
+            loadActiveAlerts(userType);
+          }
+        )
+        .subscribe();
+    } else if (userType === 'hospital') {
+      // Subscribe to medical and general alerts
+      channel = supabase
+        .channel('medical-alerts')
+        .on('postgres_changes', 
+          { 
+            event: '*', 
+            schema: 'public', 
+            table: 'alerts',
+            filter: 'type=in.(medical,general)'
+          }, 
+          () => {
+            loadActiveAlerts(userType);
+          }
+        )
+        .subscribe();
+    }
+
+    // Cleanup subscription on unmount
+    return () => {
+      if (channel) {
+        supabase.removeChannel(channel);
+      }
+    };
   };
 
   const sendEmergencyAlert = async (type: 'police' | 'medical' | 'general') => {
@@ -212,7 +296,7 @@ export default function HomeScreen() {
         if (insertError) throw insertError;
       }
 
-      // Insert alert without address column
+      // Insert alert
       const { error: alertError } = await supabase
         .from('alerts')
         .insert({
@@ -226,9 +310,12 @@ export default function HomeScreen() {
 
       if (alertError) throw alertError;
 
+      const alertTypeMessage = type === 'general' ? 'Emergency SOS' : 
+                             type === 'police' ? 'Police emergency' : 'Medical emergency';
+
       Alert.alert(
         'Alert Sent',
-        `Emergency services have been notified and are on their way to ${address}`,
+        `${alertTypeMessage} services have been notified and are on their way to ${address}`,
         [{ text: 'View Status', onPress: () => router.push('/alerts') }]
       );
     } catch (err: any) {
@@ -251,6 +338,19 @@ export default function HomeScreen() {
     }
   };
 
+  const getTypeLabel = (type: EmergencyAlert['type']) => {
+    switch (type) {
+      case 'police':
+        return 'Police Emergency';
+      case 'medical':
+        return 'Medical Emergency';
+      case 'general':
+        return 'Emergency SOS';
+      default:
+        return 'Emergency';
+    }
+  };
+
   const BlurComponent = Platform.OS === 'web' ? View : BlurView;
 
   if (userType === 'police' || userType === 'hospital') {
@@ -263,7 +363,7 @@ export default function HomeScreen() {
             <Shield size={48} color="#FF4444" />
             <Text style={styles.title}>Active Alerts</Text>
             <Text style={styles.subtitle}>
-              {userType === 'police' ? 'Police Emergencies' : 'Medical Emergencies'}
+              {userType === 'police' ? 'Police & Emergency SOS' : 'Medical & Emergency SOS'}
             </Text>
           </View>
 
@@ -279,7 +379,7 @@ export default function HomeScreen() {
               <View key={alert.id} style={styles.alertCard}>
                 <View style={styles.alertHeader}>
                   <Text style={styles.alertType}>
-                    {alert.type === 'police' ? 'Police Emergency' : 'Medical Emergency'}
+                    {getTypeLabel(alert.type)}
                   </Text>
                   <View style={[styles.statusBadge, { backgroundColor: getStatusColor(alert.status) }]}>
                     <Text style={styles.statusText}>{alert.status}</Text>
@@ -299,12 +399,50 @@ export default function HomeScreen() {
                       {alertAddresses[alert.id] || `${alert.latitude.toFixed(6)}, ${alert.longitude.toFixed(6)}`}
                     </Text>
                   </View>
+                  
+                  {/* User Contact Information */}
+                  {alert.users && (
+                    <View style={styles.contactInfo}>
+                      <Text style={styles.contactTitle}>Contact Information:</Text>
+                      <Text style={styles.contactText}>Name: {alert.users.full_name || 'N/A'}</Text>
+                      <Text style={styles.contactText}>Phone: {alert.users.phone_number || 'N/A'}</Text>
+                      {alert.users.blood_type && (
+                        <Text style={styles.contactText}>Blood Type: {alert.users.blood_type}</Text>
+                      )}
+                      {alert.users.medical_conditions && alert.users.medical_conditions.length > 0 && (
+                        <Text style={styles.contactText}>
+                          Medical Conditions: {alert.users.medical_conditions.join(', ')}
+                        </Text>
+                      )}
+                    </View>
+                  )}
+
+                  {/* Emergency Contacts */}
+                  {alert.contacts && alert.contacts.length > 0 && (
+                    <View style={styles.emergencyContacts}>
+                      <Text style={styles.contactTitle}>Emergency Contacts:</Text>
+                      {alert.contacts.map((contact, index) => (
+                        <View key={index} style={styles.emergencyContact}>
+                          <Text style={styles.contactText}>
+                            {contact.name} ({contact.relationship})
+                          </Text>
+                          <Text style={styles.contactText}>Phone: {contact.phone_number}</Text>
+                          {contact.email && (
+                            <Text style={styles.contactText}>Email: {contact.email}</Text>
+                          )}
+                          {contact.is_primary && (
+                            <Text style={styles.primaryContact}>Primary Contact</Text>
+                          )}
+                        </View>
+                      ))}
+                    </View>
+                  )}
                 </View>
 
                 <TouchableOpacity
                   style={styles.viewDetailsButton}
                   onPress={() => router.push('/alerts')}>
-                  <Text style={styles.viewDetailsText}>View Details</Text>
+                  <Text style={styles.viewDetailsText}>View Details & Respond</Text>
                 </TouchableOpacity>
               </View>
             ))}
@@ -577,6 +715,40 @@ const styles = StyleSheet.create({
   infoText: {
     fontSize: 14,
     color: '#666',
+  },
+  contactInfo: {
+    backgroundColor: '#f8f9fa',
+    padding: 12,
+    borderRadius: 8,
+    marginTop: 8,
+  },
+  contactTitle: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#1a1a1a',
+    marginBottom: 4,
+  },
+  contactText: {
+    fontSize: 13,
+    color: '#666',
+    marginBottom: 2,
+  },
+  emergencyContacts: {
+    backgroundColor: '#e3f2fd',
+    padding: 12,
+    borderRadius: 8,
+    marginTop: 8,
+  },
+  emergencyContact: {
+    marginBottom: 8,
+    paddingBottom: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: '#ddd',
+  },
+  primaryContact: {
+    fontSize: 12,
+    color: '#FF4444',
+    fontWeight: '600',
   },
   viewDetailsButton: {
     backgroundColor: '#f8f9fa',

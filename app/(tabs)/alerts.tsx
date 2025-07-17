@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { View, Text, StyleSheet, FlatList, TouchableOpacity } from 'react-native';
 import { format } from 'date-fns';
-import { TriangleAlert as AlertTriangle, CircleCheck as CheckCircle2, Clock, MapPin } from 'lucide-react-native';
+import { TriangleAlert as AlertTriangle, CircleCheck as CheckCircle2, Clock, MapPin, User } from 'lucide-react-native';
 import { supabase } from '../../lib/supabase';
 import { getAddressFromCoordinates } from '../../lib/geocoding';
 
@@ -16,6 +16,17 @@ type Alert = {
   user_id: string;
   address: string;
   description?: string;
+  user: {
+    full_name: string;
+    phone_number: string;
+    email: string;
+  };
+  primary_contact?: {
+    name: string;
+    phone_number: string;
+    email?: string;
+    relationship?: string;
+  };
 };
 
 type Response = {
@@ -33,6 +44,7 @@ export default function AlertsScreen() {
   const [error, setError] = useState('');
   const [userType, setUserType] = useState<'civilian' | 'police' | 'hospital' | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
 
   useEffect(() => {
     initializeScreen();
@@ -57,6 +69,8 @@ export default function AlertsScreen() {
         setIsLoading(false);
         return;
       }
+
+      setCurrentUserId(user.id);
 
       // Check if user is a civilian
       const { data: civilian } = await supabase
@@ -103,6 +117,11 @@ export default function AlertsScreen() {
 
       let query = supabase.from('alerts').select(`
         *,
+        user:users!alerts_user_id_fkey (
+          full_name,
+          phone_number,
+          email
+        ),
         responses (
           *,
           responder:responders (organization_name, responder_type)
@@ -113,9 +132,11 @@ export default function AlertsScreen() {
       if (userType === 'civilian') {
         query = query.eq('user_id', user.id);
       } else if (userType === 'police') {
-        query = query.eq('type', 'police');
+        // Police should see police alerts and general emergency SOS alerts
+        query = query.or('type.eq.police,type.eq.general');
       } else if (userType === 'hospital') {
-        query = query.eq('type', 'medical');
+        // Medical should see medical alerts and general emergency SOS alerts
+        query = query.or('type.eq.medical,type.eq.general');
       }
 
       const { data, error } = await query.order('created_at', { ascending: false });
@@ -126,7 +147,8 @@ export default function AlertsScreen() {
       }
 
       // For alerts without an address, fetch it using geocoding
-      const alertsWithAddresses = await Promise.all(
+      // Also fetch primary contact for each alert
+      const alertsWithAddressesAndContacts = await Promise.all(
         (data || []).map(async (alert) => {
           let address = '';
           if (alert.latitude && alert.longitude) {
@@ -137,11 +159,33 @@ export default function AlertsScreen() {
               address = `${alert.latitude.toFixed(6)}, ${alert.longitude.toFixed(6)}`;
             }
           }
-          return { ...alert, address };
+
+          // Fetch primary contact for this alert's user
+          let primaryContact = null;
+          try {
+            const { data: contactData } = await supabase
+              .from('contacts')
+              .select('name, phone_number, email, relationship')
+              .eq('user_id', alert.user_id)
+              .eq('is_primary', true)
+              .single();
+            
+            if (contactData) {
+              primaryContact = contactData;
+            }
+          } catch (contactError) {
+            console.error('Error fetching primary contact:', contactError);
+          }
+
+          return { 
+            ...alert, 
+            address,
+            primary_contact: primaryContact 
+          };
         })
       );
 
-      setAlerts(alertsWithAddresses);
+      setAlerts(alertsWithAddressesAndContacts);
       setError('');
     } catch (err: any) {
       console.error('Error loading alerts:', err);
@@ -152,7 +196,7 @@ export default function AlertsScreen() {
   };
 
   const setupRealtimeSubscription = () => {
-    if (!userType) return;
+    if (!userType || !currentUserId) return;
 
     let channel;
     
@@ -165,7 +209,7 @@ export default function AlertsScreen() {
             event: '*', 
             schema: 'public', 
             table: 'alerts',
-            filter: `user_id=eq.${supabase.auth.getUser().then(({data}) => data.user?.id)}`
+            filter: `user_id=eq.${currentUserId}`
           }, 
           () => {
             loadAlerts();
@@ -173,7 +217,7 @@ export default function AlertsScreen() {
         )
         .subscribe();
     } else if (userType === 'police') {
-      // Subscribe to police alerts
+      // Subscribe to police alerts and general emergency alerts
       channel = supabase
         .channel('police-alerts')
         .on('postgres_changes', 
@@ -187,9 +231,20 @@ export default function AlertsScreen() {
             loadAlerts();
           }
         )
+        .on('postgres_changes', 
+          { 
+            event: '*', 
+            schema: 'public', 
+            table: 'alerts',
+            filter: 'type=eq.general'
+          }, 
+          () => {
+            loadAlerts();
+          }
+        )
         .subscribe();
     } else if (userType === 'hospital') {
-      // Subscribe to medical alerts
+      // Subscribe to medical alerts and general emergency alerts
       channel = supabase
         .channel('medical-alerts')
         .on('postgres_changes', 
@@ -198,6 +253,17 @@ export default function AlertsScreen() {
             schema: 'public', 
             table: 'alerts',
             filter: 'type=eq.medical'
+          }, 
+          () => {
+            loadAlerts();
+          }
+        )
+        .on('postgres_changes', 
+          { 
+            event: '*', 
+            schema: 'public', 
+            table: 'alerts',
+            filter: 'type=eq.general'
           }, 
           () => {
             loadAlerts();
@@ -269,7 +335,7 @@ export default function AlertsScreen() {
       case 'medical':
         return 'Medical Emergency';
       case 'general':
-        return 'General Emergency';
+        return 'Emergency SOS';
       default:
         return 'Emergency';
     }
@@ -300,6 +366,52 @@ export default function AlertsScreen() {
         {item.description && (
           <View style={styles.infoRow}>
             <Text style={styles.description}>{item.description}</Text>
+          </View>
+        )}
+        
+        {/* User Contact Information */}
+        {userType !== 'civilian' && item.user && (
+          <View style={styles.contactSection}>
+            <Text style={styles.contactTitle}>Reporter Details</Text>
+            <View style={styles.infoRow}>
+              <User size={16} color="#666" />
+              <Text style={styles.infoText}>{item.user.full_name}</Text>
+            </View>
+            <View style={styles.infoRow}>
+              <Text style={styles.contactLabel}>Phone: </Text>
+              <Text style={styles.contactValue}>{item.user.phone_number}</Text>
+            </View>
+            <View style={styles.infoRow}>
+              <Text style={styles.contactLabel}>Email: </Text>
+              <Text style={styles.contactValue}>{item.user.email}</Text>
+            </View>
+            
+            {/* Primary Contact Information */}
+            {item.primary_contact && (
+              <View style={styles.emergencyContact}>
+                <Text style={styles.contactTitle}>Emergency Contact</Text>
+                <View style={styles.infoRow}>
+                  <Text style={styles.contactLabel}>Name: </Text>
+                  <Text style={styles.contactValue}>{item.primary_contact.name}</Text>
+                </View>
+                <View style={styles.infoRow}>
+                  <Text style={styles.contactLabel}>Phone: </Text>
+                  <Text style={styles.contactValue}>{item.primary_contact.phone_number}</Text>
+                </View>
+                {item.primary_contact.relationship && (
+                  <View style={styles.infoRow}>
+                    <Text style={styles.contactLabel}>Relationship: </Text>
+                    <Text style={styles.contactValue}>{item.primary_contact.relationship}</Text>
+                  </View>
+                )}
+                {item.primary_contact.email && (
+                  <View style={styles.infoRow}>
+                    <Text style={styles.contactLabel}>Email: </Text>
+                    <Text style={styles.contactValue}>{item.primary_contact.email}</Text>
+                  </View>
+                )}
+              </View>
+            )}
           </View>
         )}
       </View>
@@ -336,6 +448,9 @@ export default function AlertsScreen() {
           {item.responses.map((response) => (
             <View key={response.id} style={styles.responseItem}>
               <Text style={styles.responseText}>{response.action_taken}</Text>
+              <Text style={styles.responseOrg}>
+                {response.responder?.organization_name} ({response.responder?.responder_type})
+              </Text>
               <Text style={styles.responseTime}>
                 {format(new Date(response.created_at), 'MMM d, h:mm a')}
               </Text>
@@ -457,6 +572,33 @@ const styles = StyleSheet.create({
     color: '#1a1a1a',
     fontStyle: 'italic',
   },
+  contactSection: {
+    marginTop: 12,
+    padding: 12,
+    backgroundColor: '#e8f4f8',
+    borderRadius: 8,
+  },
+  contactTitle: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#1a1a1a',
+    marginBottom: 8,
+  },
+  contactLabel: {
+    fontSize: 14,
+    fontWeight: '500',
+    color: '#666',
+  },
+  contactValue: {
+    fontSize: 14,
+    color: '#1a1a1a',
+  },
+  emergencyContact: {
+    marginTop: 12,
+    padding: 12,
+    backgroundColor: '#fff3cd',
+    borderRadius: 8,
+  },
   actionButtons: {
     flexDirection: 'row',
     gap: 8,
@@ -492,6 +634,12 @@ const styles = StyleSheet.create({
   responseText: {
     fontSize: 14,
     color: '#1a1a1a',
+    marginBottom: 4,
+  },
+  responseOrg: {
+    fontSize: 12,
+    color: '#666',
+    fontStyle: 'italic',
     marginBottom: 4,
   },
   responseTime: {
